@@ -30,10 +30,6 @@ namespace NServer {
     }
 
     std::vector<TPoint> Parse(std::span<const char> input) {
-        size_t len;
-        std::tie(input, len) = ParseLen(input);
-        AssertSpanSize(input, len);
-
         namespace rw = std::ranges::views;
         auto rng =  input
             | rw::chunk(kDoubleSize)

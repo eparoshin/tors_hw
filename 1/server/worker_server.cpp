@@ -28,17 +28,33 @@ namespace NServer {
             }
         }
 
+
+        constexpr size_t kDoubleSize = sizeof(double);
+        constexpr size_t kPointSize = 2 * kDoubleSize;
+
         constexpr size_t kBuffSize = 1024;
         void HandleClient(int clientSocket) {
             NUtil::TDefer closeSock([clientSocket]() { close(clientSocket); });
             ssize_t bytes_read;
             std::array<char, kBuffSize> buff;
             std::vector<char> input;
-            while ((bytes_read = read(clientSocket, buff.data(), buff.size())) > 0) {
-                input.insert(input.end(), buff.begin(), buff.begin() + bytes_read);
+            size_t sz;
+            if ((bytes_read = read(clientSocket, &sz, sizeof(sz))) != sizeof(sz)) {
+                throw std::runtime_error("");
             }
 
-            double result = CalculateSquare(Parse(input));
+            sz = HostToInet(sz);
+
+            while ((bytes_read = read(clientSocket, buff.data(), buff.size())) > 0) {
+                input.insert(input.end(), buff.begin(), buff.begin() + bytes_read);
+                if (input.size() == kPointSize * sz) {
+                    break;
+                }
+            }
+
+            auto points = Parse(input);
+
+            double result = CalculateSquare(points);
 
             std::span<char> out(reinterpret_cast<char*>(&result), sizeof(result));
             while (!out.empty()) {
@@ -100,7 +116,8 @@ namespace NServer {
                           << ntohs(clientAddress.sin_port) << std::endl;
 
                 std::thread t(HandleClient, newSocket);
-                t.detach();
+                //t.detach();
+                t.join();
             }
         }
     }
