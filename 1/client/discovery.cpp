@@ -53,6 +53,7 @@ namespace NClient {
         }
 
         std::vector<std::vector<char>> PrepareRequests(std::span<const TPoint> points, size_t numNodes) {
+            assert(numNodes > 0);
             assert(points.size() >= 2);
             size_t reqSize = std::max(2ul, (points.size() + numNodes - 1) / numNodes);
             std::vector<std::vector<char>> result;
@@ -87,6 +88,8 @@ namespace NClient {
             }
 
             pollfd fd;
+            fd.fd = sockfd;
+            fd.events = POLLIN;
 
 
             std::unordered_set<sockaddr_in> addrs;
@@ -98,6 +101,7 @@ namespace NClient {
                 } else if (ret == 0) {
                     break;
                 } else {
+                    fd.revents = 0;
                     while (1) {
                         std::array<char, kBuffSize> buff;
                         sockaddr_in recvAddr;

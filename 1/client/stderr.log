@@ -1,0 +1,1 @@
+main: discovery.cpp:56: std::vector<std::vector<char> > NClient::{anonymous}::PrepareRequests(std::span<const NClient::TPoint>, size_t): Assertion `numNodes > 0' failed.
