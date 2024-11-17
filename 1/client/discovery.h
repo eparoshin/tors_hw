@@ -16,13 +16,20 @@ namespace NClient {
 
     class TDiscovery {
     public:
-        //TODO subnet
-        explicit TDiscovery(uint16_t port);
+        TDiscovery(const TDiscovery&) = delete;
+        TDiscovery& operator=(const TDiscovery&) = delete;
 
-        void UpdateList();
+        TDiscovery(in_addr broadcastAddr, uint16_t port);
+
+        void UpdateList(int timeout);
 
         double Calc(std::span<const TPoint> points) const;
+
+        ~TDiscovery();
     private:
+        in_addr broadcastAddr_;
+        uint16_t port_;
+        int sockFd_;
         NUtil::TRcu<std::vector<sockaddr_in>> addrsRef_;
     };
 }

@@ -55,9 +55,9 @@ namespace NServer {
                     return;
                 }
 
-                constexpr auto response = "SERVER_HERE";
+                constexpr std::string_view response("PONG");
 
-                auto sent = sendto(sockfd, response, strlen(response), 0,
+                auto sent = sendto(sockfd, response.data(), response.size(), 0,
                                       (const struct sockaddr*)&cliaddr, len);
                 if (sent < 0) {
                     perror("sendto error");
