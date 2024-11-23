@@ -26,8 +26,7 @@ int main(int argc, char** argv) {
 
     uint16_t port = std::stoi(argv[2]);
 
-    NClient::TDiscovery discovery(broadcastAddr, port);
-    discovery.UpdateList(1000);
+    NClient::TDiscovery discovery(broadcastAddr, port, 5000, 1000);
 
     std::cout << discovery.Calc(points) << std::endl;
 }

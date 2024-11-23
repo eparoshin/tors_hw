@@ -18,21 +18,35 @@ namespace NClient {
         };
 
         struct TRequest {
-            TRequestSender::TEndpoint* Endpoint;
+            std::shared_ptr<TRequestSender::TEndpoint> Endpoint;
             std::span<const char> Request;
             std::vector<char> Response;
             EReqState State = EReqState::FD_NOT_ASSIGNED;
         };
     }
     namespace rv = std::ranges::views;
-    TRequestSender::TRequestSender(std::span<const sockaddr_in> endpoints) {
-        endpoints_.resize(endpoints.size());
-        std::transform(endpoints.begin(), endpoints.end(), endpoints_.begin(), [](auto addr) {return TEndpoint{addr}; });
+    TRequestSender::TRequestSender(const NUtil::TRcu<std::vector<sockaddr_in>>& addrsRef, size_t maxUnupdated)
+    : addrsRef_(addrsRef)
+    , maxUnupdated_(maxUnupdated) {
+        UpdateEndpoints();
     }
 
-    TRequestSender::TEndpoint& TRequestSender::NextEndpoint() {
+    void TRequestSender::UpdateEndpoints() {
+        curr_idx_ = 0;
+        numUpdates_ = 0;
+
+        auto endpoints = addrsRef_.Aquire();
+        endpoints_.resize(endpoints->size());
+        std::transform(endpoints->begin(), endpoints->end(), endpoints_.begin(), [](auto addr) {return std::make_shared<TEndpoint>(addr); });
+    }
+
+    std::shared_ptr<TRequestSender::TEndpoint> TRequestSender::NextEndpoint() {
+        if (numUpdates_++ >= maxUnupdated_) {
+            UpdateEndpoints();
+        }
+
         for (int i = curr_idx_; i < curr_idx_ + endpoints_.size(); ++i) {
-            if (endpoints_[i % endpoints_.size()].Alive) {
+            if (endpoints_[i % endpoints_.size()]->Alive) {
                 curr_idx_ = i + 1;
                 return endpoints_[i % endpoints_.size()];
             }
@@ -45,7 +59,7 @@ namespace NClient {
 
         std::vector<TRequest> reqs;
         std::transform(requests.begin(), requests.end(), std::back_inserter(reqs), [this, requests, idx = 0](auto req) mutable {
-            return TRequest{&NextEndpoint(), requests[idx++]};
+            return TRequest{NextEndpoint(), requests[idx++]};
         });
 
 
@@ -70,7 +84,7 @@ namespace NClient {
                     auto& req = reqs.at(fdIdxs.at(sock.Fd));
                     if (sock.State == NUtil::ESockState::ERROR) {
                         req.Endpoint->Alive = false;
-                        req.Endpoint = &NextEndpoint();
+                        req.Endpoint = NextEndpoint();
                         req.State = EReqState::FD_NOT_ASSIGNED;
                         fdIdxs.erase(sock.Fd);
                     } else if (sock.State == NUtil::ESockState::CLOSED) {

@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <thread>
 #include <span>
 
 namespace NClient {
@@ -19,14 +20,16 @@ namespace NClient {
         TDiscovery(const TDiscovery&) = delete;
         TDiscovery& operator=(const TDiscovery&) = delete;
 
-        TDiscovery(in_addr broadcastAddr, uint16_t port);
+        TDiscovery(in_addr broadcastAddr, uint16_t port, int update_period, int timeout);
 
-        void UpdateList(int timeout);
 
         double Calc(std::span<const TPoint> points) const;
 
         ~TDiscovery();
     private:
+        void UpdateList(int timeout);
+
+        std::thread updater_;
         in_addr broadcastAddr_;
         uint16_t port_;
         int sockFd_;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rcu.h"
+
 #include <netinet/in.h>
 
 #include <vector>
@@ -8,7 +10,7 @@
 namespace NClient {
     class TRequestSender {
     public:
-        explicit TRequestSender(std::span<const sockaddr_in> endpoints);
+        explicit TRequestSender(const NUtil::TRcu<std::vector<sockaddr_in>>& addrsRef, size_t maxUnupdated);
 
         std::vector<std::vector<char>> SendRequests(std::span<const std::span<const char>> requests) &&;
 
@@ -18,9 +20,14 @@ namespace NClient {
         };
 
     private:
-        TEndpoint& NextEndpoint();
+        std::shared_ptr<TEndpoint> NextEndpoint();
 
+        void UpdateEndpoints();
+
+        const NUtil::TRcu<std::vector<sockaddr_in>>& addrsRef_;
+        const size_t maxUnupdated_;
         size_t curr_idx_ = 0;
-        std::vector<TEndpoint> endpoints_;
+        size_t numUpdates_ = 0;
+        std::vector<std::shared_ptr<TEndpoint>> endpoints_;
     };
 }

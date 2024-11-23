@@ -14,6 +14,7 @@
 #include <iostream>
 #include <chrono>
 #include <array>
+#include <thread>
 
 namespace std {
     template <>
@@ -137,7 +138,7 @@ namespace NClient {
         }
     }
 
-    TDiscovery::TDiscovery(in_addr broadcastAddr, uint16_t port)
+    TDiscovery::TDiscovery(in_addr broadcastAddr, uint16_t port, int update_period, int timeout)
     : broadcastAddr_(broadcastAddr)
     , port_(port)
     , sockFd_(socket(AF_INET, SOCK_DGRAM, 0)) {
@@ -162,10 +163,16 @@ namespace NClient {
             close(sockFd_);
             throw std::runtime_error("bind failed");
         }
+
+        updater_ = std::thread([this](int update_period, int timeout) {
+            UpdateList(timeout);
+            std::this_thread::sleep_for(std::chrono::milliseconds(update_period));
+        }, update_period, timeout);
     }
 
     TDiscovery::~TDiscovery() {
         close(sockFd_);
+        updater_.join();
     }
 
     void TDiscovery::UpdateList(int timeout) {
@@ -179,7 +186,7 @@ namespace NClient {
 
         auto requests = PrepareRequests(points, addrs->size());
         auto rSp = Convert(requests);
-        auto results = TRequestSender(*addrs).SendRequests(rSp);
+        auto results = TRequestSender(addrsRef_, 5).SendRequests(rSp);
         auto doubles = results | rv::transform([](std::span<const char> data) {
             assert(data.size() == sizeof(double));
             return *reinterpret_cast<double const *>(data.data());
