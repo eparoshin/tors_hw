@@ -6,6 +6,7 @@ import (
     "encoding/json"
     "encoding/binary"
     "errors"
+    "io/fs"
     "log"
 )
 
@@ -78,12 +79,19 @@ func DeserializeEntry(reader io.Reader, entry *LogEntry) (int, error) {
 func NewLog(filePath string) (Log, error) {
     file, err := os.Open(filePath)
     if err != nil {
+        if errors.Is(err, fs.ErrNotExist) {
+            log := Log{filePath, []LogEntry{LogEntry{Op: DELETE,}}}
+            err = log.DumpLog()
+            return log, err
+        }
         return Log{FilePath: filePath,}, err
     }
 
     defer file.Close()
 
     var entries []LogEntry
+    entries = append(entries, LogEntry{Op: DELETE,})
+
     offset := 0
     for {
         var entry LogEntry
@@ -105,6 +113,28 @@ func NewLog(filePath string) (Log, error) {
     return Log{filePath, entries}, nil
 }
 
+func (wlog Log) DumpLog() error {
+    name, err := func() (string, error) {
+        file, err := os.CreateTemp("", "*")
+        name := file.Name()
+        if err != nil {
+            return name, err
+        }
+        defer file.Close()
+        for _, entry := range wlog.Entries[1 : len(wlog.Entries)] {
+            SerializeEntry(entry, file)
+        }
+
+        return name, err
+    }()
+
+    if err != nil {
+        return err
+    }
+
+    return os.Rename(name, wlog.FilePath)
+}
+
 func Append(wlog Log, logEntry LogEntry) Log {
     file, err := os.OpenFile(wlog.FilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
     if err != nil {
@@ -122,4 +152,39 @@ func Append(wlog Log, logEntry LogEntry) Log {
 
 func (wlog Log) Back() LogEntry {
     return wlog.Entries[len(wlog.Entries) - 1]
+}
+
+func (wlog *Log) CheckAndCorrect(prevLogIndex uint64, prevLogTerm uint64) bool {
+    var changed bool
+    defer func() {
+        if changed {
+            err := wlog.DumpLog()
+            if err != nil {
+                log.Fatal(err)
+            }
+        }
+    }()
+
+    if int(prevLogIndex) >= len(wlog.Entries) {
+        return false
+    }
+
+    if int(prevLogIndex) < len(wlog.Entries) - 1 {
+        changed = true
+        wlog.Entries = wlog.Entries[0 : prevLogIndex + 1]
+    }
+
+    if wlog.Entries[prevLogIndex].Term != prevLogTerm {
+        changed = true
+        wlog.Entries = wlog.Entries[0 : prevLogIndex]
+        return false
+    }
+
+    return true
+}
+
+func (wlog *Log) AppendEntries(entries []LogEntry) {
+    for _, entry := range entries {
+        *wlog = Append(*wlog, entry)
+    }
 }

@@ -17,19 +17,17 @@ type PState struct {
 }
 
 func NewPState(fileName string) (state PState, err error) {
+    state.FileName = fileName
     data, err := os.ReadFile(fileName)
     if err != nil {
         if errors.Is(err, fs.ErrNotExist) {
-            file, err := os.Create(fileName)
-            if err == nil {
-                defer file.Close()
+            if err = state.DumpPState(); err != nil {
+                return
             }
-            log.Print("Empty PState file created")
         }
         return
     }
 
-    state.FileName = fileName
     err = json.Unmarshal(data, &state.State)
     return
 }
@@ -58,10 +56,10 @@ func (state *PState)SetVote (vote uint64) {
 func (state PState) DumpPState() error {
     name, err := func() (string, error) {
         file, err := os.CreateTemp("", "*")
-        name := file.Name()
         if err != nil {
-            return name, err
+            return "", err
         }
+        name := file.Name()
         defer file.Close()
         data, err := json.Marshal(state.State)
         if err != nil {

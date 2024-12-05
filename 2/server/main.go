@@ -8,14 +8,14 @@ import (
 )
 
 var Flags struct {
-    NodeId uint64
+    NodeId int64
     Workdir string
     NodesConfig string
     AppConfig string
 }
 
 func init() {
-    flag.Uint64Var(&Flags.NodeId, "nodeid", 0, "")
+    flag.Int64Var(&Flags.NodeId, "nodeid", -1, "")
     flag.StringVar(&Flags.Workdir, "workdir", "", "")
     flag.StringVar(&Flags.NodesConfig, "nodes-config", "", "")
     flag.StringVar(&Flags.AppConfig, "app-config", "", "")
@@ -23,7 +23,7 @@ func init() {
 
 func ParseFlags() {
     flag.Parse()
-    if Flags.NodeId == 0 || Flags.Workdir == "" || Flags.NodesConfig == "" || Flags.AppConfig == "" {
+    if Flags.NodeId == -1 || Flags.Workdir == "" || Flags.NodesConfig == "" || Flags.AppConfig == "" {
         log.Fatal("Flags not set", Flags)
     }
 }
@@ -52,11 +52,13 @@ func main() {
         log.Fatal("Error while reading log: ", err)
     }
 
-    env := TEnv{p: pState, l: raftLog,}
+    env := NewEnv(pState, raftLog, 100)
 
     ctx := context.Background()
 
-    raftServer, err := NewRaftServer(&env, ctx, nodesConfig, Flags.NodeId, appConfig)
+    //db := NewDb(ctx, env.commitQueue)
+
+    raftServer, err := NewRaftServer(&env, ctx, nodesConfig, uint64(Flags.NodeId), appConfig)
 
     if err != nil {
         log.Fatal("Error while creating raft server: ", err)

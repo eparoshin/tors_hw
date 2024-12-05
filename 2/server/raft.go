@@ -7,6 +7,11 @@ import (
     "encoding/json"
     "io"
     "log"
+    "time"
+    "sync/atomic"
+    "math/rand"
+    "bytes"
+    "sync"
 )
 
 type RaftState struct {
@@ -15,6 +20,8 @@ type RaftState struct {
     nodesConfig NodesConfig
     nodeId uint64
     appConfig AppConfig
+    gotHb *atomic.Bool
+    isLeader *atomic.Bool
 }
 
 type VoteRequest struct {
@@ -52,6 +59,7 @@ func (state RaftState) HandleRequestVote(w http.ResponseWriter, r *http.Request)
         }
         if voteRequest.Term > env.p.State.CurrentTerm {
             env.p.State.CurrentTerm = voteRequest.Term
+            env.leaderState = nil
             env.p.State.VotedFor = nil
             env.p.DumpPState()
         }
@@ -92,6 +100,170 @@ func (state RaftState) HandleRequestVote(w http.ResponseWriter, r *http.Request)
     }
 }
 
+func (state RaftState) requestVoteFrom(ctx context.Context, node NodeConfig, votedChan chan <- VoteResponse) {
+    voteRequest := VoteRequest{
+        Term: state.env.p.State.CurrentTerm,
+        CandidateId: state.nodeId,
+        LastLogIndex: uint64(len(state.env.l.Entries)),
+        LastLogTerm: state.env.l.Back().Term,
+    }
+
+
+    body, err := json.Marshal(voteRequest)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    request, err := http.NewRequestWithContext(ctx, "POST", node.InternalUri() + "/request_vote", bytes.NewReader(body))
+    if err != nil {
+        log.Fatal(err)
+    }
+    resp, err := http.DefaultClient.Do(request)
+    if err != nil {
+        log.Print(err)
+        return
+    }
+
+    var voteResponse VoteResponse
+    respBody, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Print(err)
+        return
+    }
+    resp.Body.Close()
+
+    if resp.StatusCode / 200 != 1 {
+        log.Printf("Non Ok response from node: %d, %s\n", resp.StatusCode, resp.Status)
+        return
+    }
+
+    if err = json.Unmarshal(respBody, &voteResponse); err != nil {
+        log.Print(err)
+        return
+    }
+
+    votedChan <- voteResponse
+    return
+
+}
+
+func (state RaftState) leaderHB(ctx context.Context, nodeId uint64, node NodeConfig) {
+    log.Println("Start leaderHB to node ", node)
+    //TODO
+}
+
+func (state RaftState) periodicLeaderHB() {
+    hbPeriod := time.Duration(int64(state.appConfig.HBIntervalMs)) * time.Millisecond
+    ticker := time.NewTicker(hbPeriod)
+    for {
+        select {
+        case <- ticker.C:
+            if (state.isLeader.Load()) {
+                func() {
+                    requestsTimeout := time.Duration(int64(state.appConfig.AppendEntriesTimeoutMs)) * time.Millisecond
+                    ctx, cancelFunc := context.WithTimeout(state.ctx, requestsTimeout)
+                    defer cancelFunc()
+                    var wg sync.WaitGroup
+                    for i, node := range state.nodesConfig {
+                        if i == int(state.nodeId) {
+                            continue
+                        }
+
+                        wg.Add(1)
+                        go func (wg *sync.WaitGroup, i uint64, node NodeConfig) {
+                            state.leaderHB(ctx, i, node)
+                            wg.Done()
+                        }(&wg, uint64(i), node)
+                    }
+                    wg.Done()
+                }()
+            } else {
+                log.Println("I am not leader anymore")
+                return
+            }
+        case <- state.ctx.Done():
+            log.Println("Finished periodic leader hb")
+            return
+        }
+    }
+}
+
+func (state RaftState) AlreadyLeader() (alreadyLeader bool) {
+    state.env.WithLock(func(env *TEnv) {
+        alreadyLeader = env.leaderState != nil
+    })
+    return
+}
+
+func (state RaftState) TryBecomeLeader() {
+    if state.AlreadyLeader() {
+        return
+    }
+
+    state.env.WithLock(func(env *TEnv) {
+        votedChan := make(chan VoteResponse, len(state.nodesConfig))
+        env.p.State.CurrentTerm += 1
+        env.p.State.VotedFor = &state.nodeId
+        env.p.DumpPState()
+        votedChan <- VoteResponse{VoteGranted: true,} //vote for myself
+
+        requestsTimeout := time.Duration(int64(state.appConfig.VoteRequestTimeoutMs)) * time.Millisecond
+        ctx, cancelFunc := context.WithTimeout(state.ctx, requestsTimeout)
+        for i, node := range state.nodesConfig {
+            if i == int(state.nodeId) {
+                continue
+            }
+
+            go state.requestVoteFrom(ctx, node, votedChan)
+        }
+
+        becameLeader := func() bool {
+            defer cancelFunc()
+            trueCount := 0
+            falseCount := 0
+            for {
+                select {
+                case <-ctx.Done():
+                    log.Print("Vote Requests timed out")
+                    return false
+                case resp := <- votedChan:
+                    if resp.VoteGranted {
+                        trueCount += 1
+                    } else {
+                        falseCount += 1
+                    }
+
+                    if resp.Term > env.p.State.CurrentTerm {
+                        env.p.State.CurrentTerm = resp.Term
+                        env.p.State.VotedFor = nil
+                        env.p.DumpPState()
+                        return false
+                    }
+
+                    if trueCount > len(state.nodesConfig) / 2 {
+                        return true
+                    }
+                    if falseCount > len(state.nodesConfig) / 2 {
+                        return false
+                    }
+                }
+
+            }
+        }()
+
+        if becameLeader {
+            log.Printf("I (nodeId: %d) became leader in term %d\n", state.nodeId, env.p.State.CurrentTerm)
+            state.isLeader.Store(true)
+
+            env.leaderId = &state.nodeId
+            env.leaderState = NewLeaderState(len(state.nodesConfig), uint64(len(env.l.Entries)))
+
+            go state.periodicLeaderHB()
+        }
+    })
+
+}
+
 type AppendRequest struct {
     Term uint64 `json:"term"`
     LeaderId uint64 `json:"leader_id"`
@@ -126,7 +298,29 @@ func (state RaftState) HandleAppendEntries(w http.ResponseWriter, r *http.Reques
             appendResponse.Term = env.p.State.CurrentTerm
             appendResponse.Success = false
             return
+        } else {
+            state.gotHb.Store(true)
+            env.leaderState = nil
+            env.leaderId = &appendRequest.LeaderId
+            env.p.State.CurrentTerm = appendRequest.Term
+            env.p.State.VotedFor = &appendRequest.LeaderId
+            env.p.DumpPState()
         }
+
+
+        if (!env.l.CheckAndCorrect(appendRequest.PrevLogIndex, appendRequest.PrevLogTerm)) {
+            appendResponse.Term = env.p.State.CurrentTerm
+            appendResponse.Success = false
+            return
+        }
+
+        env.l.AppendEntries(appendRequest.Entries)
+
+        env.CommitChanges(appendRequest.LeaderCommit)
+
+        appendResponse.Term = env.p.State.CurrentTerm
+        appendResponse.Success = true
+
     })
 
     log.Printf("AppendRequest: %v \n AppendResponse: %v", appendRequest, appendResponse)
@@ -143,6 +337,27 @@ func (state RaftState) HandleAppendEntries(w http.ResponseWriter, r *http.Reques
     }
 }
 
+func calcDeadline(durationMs int, randomShiftMs int) time.Duration {
+    return time.Duration(int64(durationMs + rand.Intn(randomShiftMs))) * time.Millisecond
+}
+
+func (state RaftState) periodicCheckHb() {
+    log.Print("Periodic check heartbeat started")
+    for {
+        timer := time.NewTimer(calcDeadline(state.appConfig.HBTimeout, state.appConfig.RandomShift))
+        select {
+            case <- timer.C:
+                if !state.gotHb.Swap(false) {
+                    log.Print("No heartbeats, initiate revote")
+                    state.TryBecomeLeader()
+                }
+            case <- state.ctx.Done():
+                log.Print("Periodic check heartbeat exited")
+                return
+        }
+    }
+}
+
 func NewRaftServer(env *TEnv, ctx context.Context, nodesConfig NodesConfig, nodeId uint64, appConfig AppConfig) (*http.Server, error) {
     raftState := RaftState{
         env: env,
@@ -150,7 +365,11 @@ func NewRaftServer(env *TEnv, ctx context.Context, nodesConfig NodesConfig, node
         nodesConfig: nodesConfig,
         nodeId: nodeId,
         appConfig: appConfig,
+        gotHb: &atomic.Bool{},
+        isLeader: &atomic.Bool{},
     }
+
+    go raftState.periodicCheckHb()
 
     serveMux := http.NewServeMux()
     serveMux.HandleFunc("/request_vote", raftState.HandleRequestVote)
