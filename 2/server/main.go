@@ -5,6 +5,7 @@ import (
     "path/filepath"
     "flag"
     "context"
+    "sync"
 )
 
 var Flags struct {
@@ -56,7 +57,7 @@ func main() {
 
     ctx := context.Background()
 
-    //db := NewDb(ctx, env.commitQueue)
+    db := NewDb(ctx, env.commitQueue)
 
     raftServer, err := NewRaftServer(&env, ctx, nodesConfig, uint64(Flags.NodeId), appConfig)
 
@@ -64,6 +65,29 @@ func main() {
         log.Fatal("Error while creating raft server: ", err)
     }
 
-    log.Fatal(raftServer.ListenAndServe())
+    extServer, err := NewExtServer(&env, db, ctx, nodesConfig, uint64(Flags.NodeId), appConfig)
+
+    if err != nil {
+        log.Fatal("Error while creating ext server: ", err)
+    }
+
+    var wg sync.WaitGroup
+
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        log.Println("Starting raft server")
+        log.Fatal(raftServer.ListenAndServe())
+    }()
+
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        log.Println("Starting ext server")
+        log.Fatal(extServer.ListenAndServe())
+    }()
+
+    wg.Wait()
+
 
 }

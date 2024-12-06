@@ -21,6 +21,7 @@ type LogEntry struct {
     Op int `json:"op"`
     Key string `json:"key"`
     Value string `json:"value"`
+    statusChan *chan bool `json:"-"`
 }
 
 type Log struct {

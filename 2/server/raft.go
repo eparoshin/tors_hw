@@ -12,6 +12,7 @@ import (
     "math/rand"
     "bytes"
     "sync"
+    "slices"
 )
 
 type RaftState struct {
@@ -41,7 +42,6 @@ func (state RaftState) HandleRequestVote(w http.ResponseWriter, r *http.Request)
     data, err := io.ReadAll(r.Body)
     if err != nil {
         log.Printf("Error while reading req body: %v", err)
-        w.WriteHeader(500)
         return
     }
 
@@ -58,6 +58,7 @@ func (state RaftState) HandleRequestVote(w http.ResponseWriter, r *http.Request)
             return
         }
         if voteRequest.Term > env.p.State.CurrentTerm {
+            state.isLeader.Store(false)
             env.p.State.CurrentTerm = voteRequest.Term
             env.leaderState = nil
             env.p.State.VotedFor = nil
@@ -75,7 +76,7 @@ func (state RaftState) HandleRequestVote(w http.ResponseWriter, r *http.Request)
             voteResponse.VoteGranted = true
             env.p.SetVote(voteRequest.CandidateId)
         } else if voteRequest.LastLogTerm == env.l.Back().Term {
-            if voteRequest.LastLogIndex >= uint64(len(env.l.Entries)) {
+            if voteRequest.LastLogIndex >= uint64(len(env.l.Entries) - 1) {
                 voteResponse.VoteGranted = true
                 env.p.SetVote(voteRequest.CandidateId)
             } else {
@@ -104,7 +105,7 @@ func (state RaftState) requestVoteFrom(ctx context.Context, node NodeConfig, vot
     voteRequest := VoteRequest{
         Term: state.env.p.State.CurrentTerm,
         CandidateId: state.nodeId,
-        LastLogIndex: uint64(len(state.env.l.Entries)),
+        LastLogIndex: uint64(len(state.env.l.Entries) - 1),
         LastLogTerm: state.env.l.Back().Term,
     }
 
@@ -132,7 +133,7 @@ func (state RaftState) requestVoteFrom(ctx context.Context, node NodeConfig, vot
     }
     resp.Body.Close()
 
-    if resp.StatusCode / 200 != 1 {
+    if resp.StatusCode / 100 != 2 {
         log.Printf("Non Ok response from node: %d, %s\n", resp.StatusCode, resp.Status)
         return
     }
@@ -147,9 +148,135 @@ func (state RaftState) requestVoteFrom(ctx context.Context, node NodeConfig, vot
 
 }
 
-func (state RaftState) leaderHB(ctx context.Context, nodeId uint64, node NodeConfig) {
+func (state RaftState) leaderHB(ctx context.Context, env *TEnv, nodeId uint64, node NodeConfig) {
     log.Println("Start leaderHB to node ", node)
-    //TODO
+    prevIdx := env.leaderState.NextIndex[nodeId] - 1
+    if prevIdx >= uint64(len(env.l.Entries)) {
+        prevIdx = uint64(len(env.l.Entries) - 1)
+    }
+    appendRequest := AppendRequest {
+        Term: env.p.State.CurrentTerm,
+        LeaderId: state.nodeId,
+        PrevLogIndex: prevIdx,
+        PrevLogTerm: env.l.Entries[prevIdx].Term,
+        Entries: env.l.Entries[prevIdx + 1 : len(env.l.Entries)],
+        LeaderCommit: env.commitIndex,
+    }
+
+
+    body, err := json.Marshal(appendRequest)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    request, err := http.NewRequestWithContext(ctx, "POST", node.InternalUri() + "/append_entries", bytes.NewReader(body))
+    if err != nil {
+        log.Fatal(err)
+    }
+    resp, err := http.DefaultClient.Do(request)
+    if err != nil {
+        log.Print(err)
+        return
+    }
+
+    var appendResponse AppendResponse
+    respBody, err := io.ReadAll(resp.Body)
+    if err != nil {
+        log.Print(err)
+        return
+    }
+    resp.Body.Close()
+
+    if resp.StatusCode / 100 != 2 {
+        log.Printf("Non Ok response from node: %d, %s\n", resp.StatusCode, resp.Status)
+        return
+    }
+
+    if err = json.Unmarshal(respBody, &appendResponse); err != nil {
+        log.Print(err)
+        return
+    }
+
+    if appendResponse.Term > env.p.State.CurrentTerm {
+        state.isLeader.Store(false)
+        return
+    }
+
+    if appendResponse.Success {
+        env.leaderState.NextIndex[nodeId] = uint64(len(env.l.Entries))
+        env.leaderState.MatchIndex[nodeId] = uint64(len(env.l.Entries) - 1)
+    } else {
+        env.leaderState.NextIndex[nodeId] -= 1
+    }
+}
+
+func calcCommitIndex(matchIndex []uint64) (maxIdx uint64) {
+    indexes := slices.Clone(matchIndex)
+    slices.Sort(indexes)
+    numNodes := len(indexes)
+    prevIdx := indexes[0]
+    var currCnt int 
+    for i, idx := range indexes {
+        if idx == prevIdx {
+            currCnt += 1
+        } else {
+            if currCnt + (numNodes - i) > numNodes / 2 {
+                maxIdx = prevIdx
+            }
+
+            currCnt = 1
+            prevIdx = idx
+        }
+    }
+
+    if currCnt > numNodes / 2 {
+        maxIdx = prevIdx
+    }
+
+    log.Printf("Calc - Indexes: %v\n MaxIdx: %d\n", indexes, maxIdx)
+
+    return
+
+}
+
+func (state RaftState) leaderHBBroadcast() (isLeader bool) {
+    isLeader = state.isLeader.Load()
+    if isLeader {
+        state.env.WithLock(func(env *TEnv) {
+            isLeader = state.isLeader.Load()
+            if !isLeader {
+
+                log.Println("I am not leader anymore")
+                return
+            }
+            requestsTimeout := time.Duration(int64(state.appConfig.AppendEntriesTimeoutMs)) * time.Millisecond
+            ctx, cancelFunc := context.WithTimeout(state.ctx, requestsTimeout)
+            defer cancelFunc()
+            var wg sync.WaitGroup
+            for i, node := range state.nodesConfig {
+                if i == int(state.nodeId) {
+                    continue
+                }
+
+                wg.Add(1)
+                go func (wg *sync.WaitGroup, i uint64, node NodeConfig) {
+                    state.leaderHB(ctx, env, i, node)
+                    wg.Done()
+                }(&wg, uint64(i), node)
+            }
+
+            newCommitIndex := calcCommitIndex(env.leaderState.MatchIndex)
+            if env.commitIndex < newCommitIndex {
+                env.commitIndex = newCommitIndex
+                env.CommitChanges(newCommitIndex)
+            }
+
+            wg.Wait()
+        })
+    } else {
+        log.Println("I am not leader anymore")
+    }
+    return
 }
 
 func (state RaftState) periodicLeaderHB() {
@@ -158,29 +285,16 @@ func (state RaftState) periodicLeaderHB() {
     for {
         select {
         case <- ticker.C:
-            if (state.isLeader.Load()) {
-                func() {
-                    requestsTimeout := time.Duration(int64(state.appConfig.AppendEntriesTimeoutMs)) * time.Millisecond
-                    ctx, cancelFunc := context.WithTimeout(state.ctx, requestsTimeout)
-                    defer cancelFunc()
-                    var wg sync.WaitGroup
-                    for i, node := range state.nodesConfig {
-                        if i == int(state.nodeId) {
-                            continue
-                        }
+            log.Println("Periodic hb")
+            state.leaderHBBroadcast()
 
-                        wg.Add(1)
-                        go func (wg *sync.WaitGroup, i uint64, node NodeConfig) {
-                            state.leaderHB(ctx, i, node)
-                            wg.Done()
-                        }(&wg, uint64(i), node)
-                    }
-                    wg.Done()
-                }()
-            } else {
-                log.Println("I am not leader anymore")
-                return
+        case <- state.env.newEntriesAlert.C:
+            if state.isLeader.Load() {
+                log.Println("Got new entries, forced hb")
+                ticker.Reset(hbPeriod)
+                state.leaderHBBroadcast()
             }
+
         case <- state.ctx.Done():
             log.Println("Finished periodic leader hb")
             return
@@ -253,12 +367,13 @@ func (state RaftState) TryBecomeLeader() {
 
         if becameLeader {
             log.Printf("I (nodeId: %d) became leader in term %d\n", state.nodeId, env.p.State.CurrentTerm)
+            env.leaderId = &state.nodeId
+            env.leaderState = NewLeaderState(state.nodeId, len(state.nodesConfig), uint64(len(env.l.Entries) - 1))
+
             state.isLeader.Store(true)
 
-            env.leaderId = &state.nodeId
-            env.leaderState = NewLeaderState(len(state.nodesConfig), uint64(len(env.l.Entries)))
-
-            go state.periodicLeaderHB()
+        } else {
+            state.isLeader.Store(false)
         }
     })
 
@@ -300,6 +415,7 @@ func (state RaftState) HandleAppendEntries(w http.ResponseWriter, r *http.Reques
             return
         } else {
             state.gotHb.Store(true)
+            state.isLeader.Store(false)
             env.leaderState = nil
             env.leaderId = &appendRequest.LeaderId
             env.p.State.CurrentTerm = appendRequest.Term
@@ -347,7 +463,7 @@ func (state RaftState) periodicCheckHb() {
         timer := time.NewTimer(calcDeadline(state.appConfig.HBTimeout, state.appConfig.RandomShift))
         select {
             case <- timer.C:
-                if !state.gotHb.Swap(false) {
+                if !state.isLeader.Load() && !state.gotHb.Swap(false) {
                     log.Print("No heartbeats, initiate revote")
                     state.TryBecomeLeader()
                 }
@@ -370,6 +486,7 @@ func NewRaftServer(env *TEnv, ctx context.Context, nodesConfig NodesConfig, node
     }
 
     go raftState.periodicCheckHb()
+    go raftState.periodicLeaderHB()
 
     serveMux := http.NewServeMux()
     serveMux.HandleFunc("/request_vote", raftState.HandleRequestVote)

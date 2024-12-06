@@ -9,6 +9,7 @@ import (
     "sync/atomic"
     "math/rand"
     "strings"
+    "io"
 )
 
 type ExternalState struct {
@@ -36,7 +37,7 @@ func (state ExternalState) chooseNextFollower() (NodeConfig) {
 }
 
 func getKey(path string) (string, bool) {
-    basePath = "/entry/"
+    basePath := "/entry/"
 
     if !strings.HasPrefix(path, basePath) {
         return "", false
@@ -59,11 +60,12 @@ func (state ExternalState) getLeaderOrRandom() (NodeConfig) {
 
     //if there is no known leader, redirect to random node, maybe it knows the leader
     if leaderId == nil {
-        idx := rand.Uint64n(len(state.nodes))
+        idx := rand.Intn(len(state.nodes))
 
-        for ; idx == state.nodeId; idx = rand.Uint64(len(state.nodes)) {
+        for ; idx == int(state.nodeId); idx = rand.Intn(len(state.nodes)) {
         }
-        leaderId = &idx
+        id := uint64(idx)
+        leaderId = &id
     }
 
     return state.nodes[*leaderId]
@@ -71,17 +73,17 @@ func (state ExternalState) getLeaderOrRandom() (NodeConfig) {
 
 func (state ExternalState) redirectToFollower(w http.ResponseWriter, r *http.Request) {
     node := state.chooseNextFollower()
-    uri := node.ExternalUri() + "/" + r.URL.Path
+    uri := node.ExternalUri() + r.URL.Path
     http.Redirect(w, r, uri, http.StatusSeeOther)
 }
 
 func (state ExternalState) redirectToLeader(w http.ResponseWriter, r *http.Request) {
     node := state.getLeaderOrRandom()
-    uri := node.ExternalUri() + "/" + r.URL.Path
+    uri := node.ExternalUri() + r.URL.Path
     http.Redirect(w, r, uri, http.StatusTemporaryRedirect)
 }
 
-type GetResponse struct {
+type KeyVal struct {
     Key string `json:"key"`
     Value string `json:"value"`
 }
@@ -94,8 +96,8 @@ func (state ExternalState) handleGet(w http.ResponseWriter, r *http.Request) {
 
     if key, ok := getKey(r.URL.Path); ok {
         if val, found := state.db.Get(key); found {
-            getResp := GetResponse{key, val}
-            resp, err := json.Marshal(voteResponse)
+            getResp := KeyVal{key, val}
+            resp, err := json.Marshal(getResp)
             if err != nil {
                 log.Fatal(err)
             }
@@ -110,16 +112,16 @@ func (state ExternalState) handleGet(w http.ResponseWriter, r *http.Request) {
                 log.Fatal(err)
             }
 
+            w.WriteHeader(http.StatusNotFound)
             n, err := w.Write(resp)
             if err != nil || n < len(resp) {
                 log.Printf("Error while writing response: %v, %d bytes written", err, n)
                 return
             }
 
-            w.WriteCode(http.StatusNotFound)
         }
     } else {
-        http.error(w, "Not found", http.StatusNotFound)
+        http.Error(w, "Not found", http.StatusNotFound)
     }
 
 }
@@ -129,12 +131,95 @@ func (state ExternalState) handleCreate(w http.ResponseWriter, r *http.Request) 
         state.redirectToLeader(w, r)
         return
     }
+
+    var createRequest KeyVal
+    data, err := io.ReadAll(r.Body)
+    if err != nil {
+        log.Printf("Error while reading req body: %v", err)
+        return
+    }
+
+    if err = json.Unmarshal(data, &createRequest); err != nil {
+        http.Error(w, fmt.Sprint(err), http.StatusBadRequest)
+        return
+    }
+
+    if state.env.ApplyRequestSync(CREATE, createRequest.Key, createRequest.Value) {
+        resp, err := json.Marshal(map[string]string{"message": "Entry created successfully"})
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        w.WriteHeader(http.StatusCreated)
+        n, err := w.Write(resp)
+        if err != nil || n < len(resp) {
+            log.Printf("Error while writing response: %v, %d bytes written", err, n)
+            return
+        }
+
+    } else {
+        resp, err := json.Marshal(map[string]string{"error": "Entry already exists"})
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        w.WriteHeader(http.StatusConflict)
+        n, err := w.Write(resp)
+        if err != nil || n < len(resp) {
+            log.Printf("Error while writing response: %v, %d bytes written", err, n)
+            return
+        }
+
+    }
+
 }
 
 func (state ExternalState) handleUpdate(w http.ResponseWriter, r *http.Request) {
     if !state.isLeader() {
         state.redirectToLeader(w, r)
         return
+    }
+
+    var updateRequest struct {
+        Value string `json:"value"`
+    }
+
+    data, err := io.ReadAll(r.Body)
+    if err != nil {
+        log.Printf("Error while reading req body: %v", err)
+        return
+    }
+
+    if err = json.Unmarshal(data, &updateRequest); err != nil {
+        http.Error(w, fmt.Sprint(err), http.StatusBadRequest)
+        return
+    }
+
+    if key, ok := getKey(r.URL.Path); ok && state.env.ApplyRequestSync(UPDATE, key, updateRequest.Value) {
+        resp, err := json.Marshal(map[string]string{"message": "Entry updated successfully"})
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        n, err := w.Write(resp)
+        if err != nil || n < len(resp) {
+            log.Printf("Error while writing response: %v, %d bytes written", err, n)
+            return
+        }
+
+    } else {
+        resp, err := json.Marshal(map[string]string{"error": "Entry not found"})
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        w.WriteHeader(http.StatusNotFound)
+        n, err := w.Write(resp)
+        if err != nil || n < len(resp) {
+            log.Printf("Error while writing response: %v, %d bytes written", err, n)
+            return
+        }
+
     }
 }
 
@@ -143,35 +228,51 @@ func (state ExternalState) handleDelete(w http.ResponseWriter, r *http.Request) 
         state.redirectToLeader(w, r)
         return
     }
+
+    if key, ok := getKey(r.URL.Path); ok && state.env.ApplyRequestSync(DELETE, key, "") {
+        resp, err := json.Marshal(map[string]string{"message": "Entry deleted successfully"})
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        n, err := w.Write(resp)
+        if err != nil || n < len(resp) {
+            log.Printf("Error while writing response: %v, %d bytes written", err, n)
+            return
+        }
+
+    } else {
+        resp, err := json.Marshal(map[string]string{"error": "Entry not found"})
+        if err != nil {
+            log.Fatal(err)
+        }
+
+        w.WriteHeader(http.StatusNotFound)
+        n, err := w.Write(resp)
+        if err != nil || n < len(resp) {
+            log.Printf("Error while writing response: %v, %d bytes written", err, n)
+            return
+        }
+
+    }
 }
 
-func returnNotAllowed(w http.ResponseWriter, r *http.Request) {
-    w.Header().Add("Allow", "GET, POST, PUT, DELETE")
+func returnNotAllowed(w http.ResponseWriter) {
     w.WriteHeader(http.StatusMethodNotAllowed)
+    w.Header().Add("Allow", "GET, PUT, DELETE")
 }
 
-func (state ExternalState) HandleEntry(w http.ResponseWriter, r *http.Request) {
+func (state ExternalState) handleEntry(w http.ResponseWriter, r *http.Request) {
     switch (r.Method) {
     case "GET":
         state.handleGet(w, r)
-    case "POST":
-        state.handleCreate(w, r)
     case "PUT":
         state.handleUpdate(w, r)
     case "DELETE":
         state.handleDelete(w, r)
     default:
-        returnNotAllowed(w, r)
-
-
+        returnNotAllowed(w)
     }
-    if state.isLeader() {
-        state.redirectToFollower(w, r)
-    } else {
-        state.handleFollowerGet(w, r)
-
-    }
-
 
 }
 
@@ -181,15 +282,14 @@ func NewExtServer(env *TEnv, db *Db, ctx context.Context, nodesConfig NodesConfi
         env: env,
         ctx: ctx,
         db: db,
-        nodes: nodes,
-        nodeId: nodeId
+        nodes: nodesConfig,
+        nodeId: nodeId,
         roundRobin: &atomic.Uint64{},
     }
 
-    //go raftState.periodicCheckHb()
-
     serveMux := http.NewServeMux()
-    serveMux.HandleFunc("/entry/", state.HandleEntry)
+    serveMux.HandleFunc("/entry", state.handleCreate)
+    serveMux.HandleFunc("/entry/", state.handleEntry)
 
     return &http.Server {
         Addr:           fmt.Sprintf(":%d", nodesConfig[nodeId].ExternalPort),

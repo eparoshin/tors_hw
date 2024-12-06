@@ -21,7 +21,10 @@ func periodicUpdate(db *Db, ctx context.Context, commitQueue <- chan LogEntry) {
             return
         case entry := <- commitQueue:
             log.Print("got new commit entry ", entry)
-            db.CommitEntry(entry)
+            status := db.CommitEntry(entry)
+            if entry.statusChan != nil {
+                *entry.statusChan <- status
+            }
         }
     }
 }
@@ -33,15 +36,18 @@ func NewDb(ctx context.Context, commitQueue <- chan LogEntry) *Db {
     return &db
 }
 
-func (db *Db) CommitEntry(entry LogEntry) {
+func (db *Db) CommitEntry(entry LogEntry) bool {
     switch entry.Op {
     case CREATE:
-        db.Create(entry.Key, entry.Value)
+        return db.Create(entry.Key, entry.Value)
     case UPDATE:
-        db.Update(entry.Key, entry.Value)
+        return db.Update(entry.Key, entry.Value)
     case DELETE:
-        db.Delete(entry.Key)
+        return db.Delete(entry.Key)
+    default:
+        log.Fatalln("incorrect Op")
     }
+    return false
 }
 
 func (db *Db) Get(key string) (string, bool) {
