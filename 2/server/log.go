@@ -14,12 +14,14 @@ const (
     CREATE = iota
     UPDATE
     DELETE
+    CAS
 )
 
 type LogEntry struct {
     Term uint64 `json:"term"`
     Op int `json:"op"`
     Key string `json:"key"`
+    PrevValue string `json:"prev_value"` //for CAS
     Value string `json:"value"`
     statusChan *chan bool `json:"-"`
 }

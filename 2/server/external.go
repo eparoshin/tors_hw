@@ -144,7 +144,7 @@ func (state ExternalState) handleCreate(w http.ResponseWriter, r *http.Request) 
         return
     }
 
-    if state.env.ApplyRequestSync(CREATE, createRequest.Key, createRequest.Value) {
+    if state.env.ApplyRequestSync(CREATE, createRequest.Key, createRequest.Value, "") {
         resp, err := json.Marshal(map[string]string{"message": "Entry created successfully"})
         if err != nil {
             log.Fatal(err)
@@ -174,13 +174,14 @@ func (state ExternalState) handleCreate(w http.ResponseWriter, r *http.Request) 
 
 }
 
-func (state ExternalState) handleUpdate(w http.ResponseWriter, r *http.Request) {
+func (state ExternalState) handleUpdateOrCas(w http.ResponseWriter, r *http.Request) {
     if !state.isLeader() {
         state.redirectToLeader(w, r)
         return
     }
 
     var updateRequest struct {
+        PrevValue *string `json:"prev_value"`
         Value string `json:"value"`
     }
 
@@ -195,7 +196,15 @@ func (state ExternalState) handleUpdate(w http.ResponseWriter, r *http.Request) 
         return
     }
 
-    if key, ok := getKey(r.URL.Path); ok && state.env.ApplyRequestSync(UPDATE, key, updateRequest.Value) {
+    applyRequestSync := func (key string) bool {
+        if updateRequest.PrevValue != nil {
+            return state.env.ApplyRequestSync(CAS, key, updateRequest.Value, *updateRequest.PrevValue)
+        } else {
+            return state.env.ApplyRequestSync(UPDATE, key, updateRequest.Value, "")
+        }
+    }
+
+    if key, ok := getKey(r.URL.Path); ok && applyRequestSync(key) {
         resp, err := json.Marshal(map[string]string{"message": "Entry updated successfully"})
         if err != nil {
             log.Fatal(err)
@@ -229,7 +238,7 @@ func (state ExternalState) handleDelete(w http.ResponseWriter, r *http.Request) 
         return
     }
 
-    if key, ok := getKey(r.URL.Path); ok && state.env.ApplyRequestSync(DELETE, key, "") {
+    if key, ok := getKey(r.URL.Path); ok && state.env.ApplyRequestSync(DELETE, key, "", "") {
         resp, err := json.Marshal(map[string]string{"message": "Entry deleted successfully"})
         if err != nil {
             log.Fatal(err)
@@ -267,7 +276,7 @@ func (state ExternalState) handleEntry(w http.ResponseWriter, r *http.Request) {
     case "GET":
         state.handleGet(w, r)
     case "PUT":
-        state.handleUpdate(w, r)
+        state.handleUpdateOrCas(w, r)
     case "DELETE":
         state.handleDelete(w, r)
     default:

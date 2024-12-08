@@ -44,6 +44,8 @@ func (db *Db) CommitEntry(entry LogEntry) bool {
         return db.Update(entry.Key, entry.Value)
     case DELETE:
         return db.Delete(entry.Key)
+    case CAS:
+        return db.Cas(entry.Key, entry.PrevValue, entry.Value)
     default:
         log.Fatalln("incorrect Op")
     }
@@ -89,6 +91,22 @@ func (db *Db) Delete(key string) bool {
     if _, ok := db.data[key]; ok {
         delete(db.data, key)
         return true
+    } else {
+        return false
+    }
+}
+
+func (db *Db) Cas(key string, prev_val string, new_val string) bool {
+    db.m.Lock()
+    defer db.m.Unlock()
+
+    if val, ok := db.data[key]; ok {
+        if val == prev_val {
+            db.data[key] = new_val
+            return true;
+        } else {
+            return false;
+        }
     } else {
         return false
     }

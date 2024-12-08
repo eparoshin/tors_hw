@@ -81,10 +81,10 @@ type ApplyRequest struct {
     resp chan bool
 }
 
-func (env *TEnv) ApplyRequestSync(op int, key string, value string) bool {
+func (env *TEnv) ApplyRequestSync(op int, key string, value string, prevValue string) bool {
     statusChan := make(chan bool, 1)
     env.WithLock(func(env *TEnv) {
-        env.l = Append(env.l, LogEntry{Op: op, Key: key, Value: value, statusChan: &statusChan,})
+        env.l = Append(env.l, LogEntry{Op: op, Key: key, Value: value, PrevValue: prevValue, statusChan: &statusChan,})
     })
     env.newEntriesAlert.Signal()
     return <-statusChan

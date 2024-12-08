@@ -157,6 +157,37 @@ func ProcessDelete(ctx context.Context, key string, nodeId int) string {
     }
 }
 
+func ProcessCas(ctx context.Context, key string, prevVal string, newVal string, nodeId int) string {
+    for {
+        nodeId = getNodeId(nodeId)
+        data, err := json.Marshal(map[string]string{"prev_value": prevVal, "value": newVal})
+        if err != nil {
+            log.Fatal(err)
+        }
+        req, err := http.NewRequestWithContext(ctx, "PUT", nodes[nodeId].ExternalUri() + "/entry/" + key, bytes.NewReader(data))
+        if err != nil {
+            log.Fatal(err)
+        }
+        log.Print(req.URL)
+        resp, err := client.Do(req)
+        if err != nil {
+            log.Println(err)
+            nodeId = -1
+            continue
+        }
+
+        respBody, err := io.ReadAll(resp.Body)
+        if err != nil {
+            log.Print(err)
+            nodeId = -1
+            continue
+        }
+        resp.Body.Close()
+
+        return fmt.Sprintf("resp: %+v\t body: %s", resp, string(respBody))
+    }
+}
+
 func Process(line string) string {
     lines := strings.Fields(strings.ToLower(line))
     log.Printf("Len lines: %d\n", len(lines))
@@ -184,6 +215,11 @@ func Process(line string) string {
             fmt.Sscanf(lines[2], "%d", &nodeId)
         }
         return ProcessDelete(ctx, lines[1], nodeId)
+    case "cas":
+        if len(lines) > 4 {
+            fmt.Sscanf(lines[4], "%d", &nodeId)
+        }
+        return ProcessCas(ctx, lines[1], lines[2], lines[3], nodeId)
     default:
         log.Fatalln(line)
     }
